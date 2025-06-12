@@ -12,12 +12,14 @@ from datetime import datetime, timedelta
 from random import choice
 
 # ✅ Получаем токен из переменных окружения
-TOKEN = os.getenv("TOKEN")
+TOKEN = os.getenv("BOT_TOKEN")
 if not TOKEN:
     raise ValueError("Переменная окружения TOKEN не установлена!")
 
 # ✅ Инициализация бота
-bot = Bot(token=TOKEN, parse_mode=ParseMode.HTML)
+from aiogram.client.default import DefaultBotProperties
+
+bot = Bot(token=TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
 dp = Dispatcher(storage=MemoryStorage())
 
 DATA_FILE = "user_data.json"
