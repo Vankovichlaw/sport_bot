@@ -1,119 +1,175 @@
-import logging
-import json
-from pathlib import Path
-from aiogram import Bot, Dispatcher, F
-from aiogram.types import Message
-from aiogram.fsm.context import FSMContext
-from aiogram.fsm.storage.memory import MemoryStorage
-from aiogram.fsm.state import State, StatesGroup
-from aiogram.enums import ParseMode
-from aiogram.filters import CommandStart, Command
-from aiogram.utils.keyboard import InlineKeyboardBuilder
 import asyncio
 import os
-from dotenv import load_dotenv
+import json
+from aiogram import Bot, Dispatcher, F
+from aiogram.enums import ParseMode
+from aiogram.types import Message, CallbackQuery
+from aiogram.fsm.context import FSMContext
+from aiogram.fsm.storage.memory import MemoryStorage
+from aiogram.fsm.state import StatesGroup, State
+from aiogram.types import KeyboardButton, ReplyKeyboardMarkup
+from datetime import datetime, timedelta
+from random import choice
 
-load_dotenv()
+# ✅ Получаем токен из переменных окружения
+TOKEN = os.getenv("TOKEN")
+if not TOKEN:
+    raise ValueError("Переменная окружения TOKEN не установлена!")
 
-TOKEN = os.getenv("BOT_TOKEN")
-DATA_FILE = Path("data.json")
-if not DATA_FILE.exists():
-    DATA_FILE.write_text(json.dumps({}))
-
+# ✅ Инициализация бота
 bot = Bot(token=TOKEN, parse_mode=ParseMode.HTML)
-storage = MemoryStorage()
-dp = Dispatcher(storage=storage)
-logging.basicConfig(level=logging.INFO)
+dp = Dispatcher(storage=MemoryStorage())
 
-class Form(StatesGroup):
-    waiting_for_comment = State()
+DATA_FILE = "user_data.json"
 
-# Загружаем данные
+# ============================ FSM ============================
+
+class TrainingStates(StatesGroup):
+    choosing_sport = State()
+    setting_goal = State()
+    setting_next_training = State()
+    adding_comment = State()
+
+# ============================ КНОПКИ ============================
+
+main_kb = ReplyKeyboardMarkup(keyboard=[
+    [KeyboardButton(text="➕ Добавить тренировку")],
+    [KeyboardButton(text="📅 Следующая тренировка"), KeyboardButton(text="📊 Статистика")],
+    [KeyboardButton(text="🔄 Сбросить все данные")]
+], resize_keyboard=True)
+
+# ============================ ХРАНИЛИЩЕ ============================
+
 def load_data():
-    return json.loads(DATA_FILE.read_text())
+    if os.path.exists(DATA_FILE):
+        with open(DATA_FILE, "r") as f:
+            return json.load(f)
+    return {}
 
-# Сохраняем данные
 def save_data(data):
-    DATA_FILE.write_text(json.dumps(data, indent=2))
+    with open(DATA_FILE, "w") as f:
+        json.dump(data, f, indent=2)
 
-# Получить клавиатуру меню
-def get_main_keyboard():
-    kb = InlineKeyboardBuilder()
-    kb.button(text="➕ Добавить тренировку", callback_data="add_training")
-    kb.button(text="📅 Следующая тренировка", callback_data="next_training")
-    kb.button(text="📊 Статистика", callback_data="stats")
-    kb.adjust(1)
-    return kb.as_markup()
+# ============================ МОТИВАЦИЯ ============================
 
-# Получить статус
-def get_status(user_id):
+quotes = [
+    "💪 Каждый шаг приближает тебя к цели!",
+    "🔥 Сегодняшняя тренировка — вклад в завтрашнюю победу!",
+    "🏆 Постоянство важнее мотивации!",
+    "🚀 Не сдавайся, ты уже начал!",
+    "⏱️ Лучшая тренировка — та, что сделана!"
+]
+
+# ============================ ОБНОВЛЕНИЕ СТАТУСА ============================
+
+async def send_status(message: Message, user_data: dict):
+    uid = str(message.from_user.id)
+    u = user_data.get(uid, {})
+    text = f"<b>🏋️ Текущий статус:</b>\n\n"
+    text += f"🎯 Цель месяца: {u.get('goal', 'не указана')}\n"
+    text += f"🏃‍♂️ Вид спорта: {u.get('sport', 'не выбран')}\n"
+    text += f"📅 Следующая тренировка: {u.get('next_training', 'не запланирована')}\n"
+    text += f"✅ Тренировок в этом месяце: {u.get('trainings', 0)}\n"
+    text += f"🏅 Награды: {u.get('awards', 0)}\n"
+    comment = u.get("last_comment")
+    if comment:
+        text += f"💬 Последний комментарий: {comment}\n"
+    text += f"\n🧠 {choice(quotes)}"
+    await message.answer(text, reply_markup=main_kb)
+
+# ============================ ОБРАБОТЧИКИ ============================
+
+@dp.message(F.text == "/start")
+async def start(message: Message, state: FSMContext):
+    await message.answer("👋 Привет! Я помогу тебе следить за тренировками.\n\nДавай начнём с создания профиля!")
+    await message.answer("💬 Какой у тебя вид спорта? (Например: бег, йога, зал)")
+    await state.set_state(TrainingStates.choosing_sport)
+
+@dp.message(TrainingStates.choosing_sport)
+async def choose_sport(message: Message, state: FSMContext):
+    uid = str(message.from_user.id)
     data = load_data()
-    user = data.get(str(user_id), {})
-    status = f"🎯 Цель: {user.get('goal', 'не задана')}\n"
-    status += f"📈 Тренировок: {len(user.get('trainings', []))}\n"
-    status += f"📅 Следующая: {user.get('next', 'не запланирована')}\n"
-    status += f"💬 Последний коммент: {user.get('last_comment', '—')}"
-    return status
+    data.setdefault(uid, {})["sport"] = message.text
+    save_data(data)
+    await message.answer("🎯 Укажи цель на этот месяц (например: 12 тренировок):")
+    await state.set_state(TrainingStates.setting_goal)
 
-@dp.message(CommandStart())
-async def cmd_start(message: Message, state: FSMContext):
-    kb = get_main_keyboard()
-    await message.answer(f"Привет, {message.from_user.first_name}!\n\nВот твой статус:\n\n{get_status(message.from_user.id)}", reply_markup=kb)
+@dp.message(TrainingStates.setting_goal)
+async def set_goal(message: Message, state: FSMContext):
+    uid = str(message.from_user.id)
+    data = load_data()
+    data.setdefault(uid, {})["goal"] = message.text
+    data[uid]["trainings"] = 0
+    data[uid]["awards"] = 0
+    save_data(data)
+    await message.answer("📅 Когда следующая тренировка? (например: 2025-06-15)")
+    await state.set_state(TrainingStates.setting_next_training)
+
+@dp.message(TrainingStates.setting_next_training)
+async def set_next_training(message: Message, state: FSMContext):
+    uid = str(message.from_user.id)
+    data = load_data()
+    data.setdefault(uid, {})["next_training"] = message.text
+    save_data(data)
+    await message.answer("✅ Профиль создан!")
+    await send_status(message, data)
     await state.clear()
 
-@dp.callback_query(F.data == "add_training")
-async def add_training(callback, state: FSMContext):
+@dp.message(F.text == "➕ Добавить тренировку")
+async def add_training(message: Message, state: FSMContext):
+    uid = str(message.from_user.id)
     data = load_data()
-    user_id = str(callback.from_user.id)
-    user = data.setdefault(user_id, {"trainings": []})
-    user["trainings"].append("✅")
+    user = data.setdefault(uid, {})
+    user["trainings"] = user.get("trainings", 0) + 1
+
+    # Награда за каждые 5 тренировок
+    if user["trainings"] % 5 == 0:
+        user["awards"] = user.get("awards", 0) + 1
+        await message.answer("🏅 Поздравляем! Ты получил награду за регулярность!")
+
     save_data(data)
+    await message.answer("🗒️ Как прошла тренировка? Напиши короткий комментарий:")
+    await state.set_state(TrainingStates.adding_comment)
 
-    await callback.message.edit_text("Тренировка добавлена ✅\n\nНапиши кратко, как она прошла:", reply_markup=None)
-    await state.set_state(Form.waiting_for_comment)
-    await callback.answer()
-
-@dp.message(Form.waiting_for_comment)
-async def save_comment(message: Message, state: FSMContext):
+@dp.message(TrainingStates.adding_comment)
+async def add_comment(message: Message, state: FSMContext):
+    uid = str(message.from_user.id)
     data = load_data()
-    user_id = str(message.from_user.id)
-    comment = message.text
-    data.setdefault(user_id, {})["last_comment"] = comment
+    data.setdefault(uid, {})["last_comment"] = message.text
     save_data(data)
-
-    await message.answer(f"Комментарий сохранён ✅\n\nОбновлённый статус:\n\n{get_status(user_id)}", reply_markup=get_main_keyboard())
+    await message.answer("✅ Спасибо за отзыв! Всё сохранено.")
+    await send_status(message, data)
     await state.clear()
 
-@dp.callback_query(F.data == "next_training")
-async def set_next(callback, state: FSMContext):
-    await callback.message.edit_text("Напиши дату следующей тренировки (например, 15 июня):")
-    await state.set_state("waiting_for_date")
-    await callback.answer()
-
-@dp.message(F.state == "waiting_for_date")
-async def save_date(message: Message, state: FSMContext):
+@dp.message(F.text == "📅 Следующая тренировка")
+async def show_next(message: Message):
+    uid = str(message.from_user.id)
     data = load_data()
-    user_id = str(message.from_user.id)
-    data.setdefault(user_id, {})["next"] = message.text
-    save_data(data)
+    next_training = data.get(uid, {}).get("next_training", "не запланирована")
+    await message.answer(f"📅 Следующая тренировка: <b>{next_training}</b>")
 
-    await message.answer(f"Дата сохранена ✅\n\nОбновлённый статус:\n\n{get_status(user_id)}", reply_markup=get_main_keyboard())
-    await state.clear()
-
-@dp.callback_query(F.data == "stats")
-async def show_stats(callback, state: FSMContext):
-    await callback.message.edit_text(f"📊 Твоя статистика:\n\n{get_status(callback.from_user.id)}", reply_markup=get_main_keyboard())
-    await callback.answer()
-
-@dp.message(Command("reset"))
-async def reset_user(message: Message, state: FSMContext):
+@dp.message(F.text == "📊 Статистика")
+async def stats(message: Message):
+    uid = str(message.from_user.id)
     data = load_data()
-    user_id = str(message.from_user.id)
-    if user_id in data:
-        del data[user_id]
+    u = data.get(uid, {})
+    await message.answer(
+        f"📊 <b>Твоя статистика:</b>\n"
+        f"Тренировок в этом месяце: {u.get('trainings', 0)}\n"
+        f"Цель: {u.get('goal', 'не указана')}\n"
+        f"Награды: {u.get('awards', 0)}"
+    )
+
+@dp.message(F.text == "🔄 Сбросить все данные")
+async def reset_data(message: Message):
+    uid = str(message.from_user.id)
+    data = load_data()
+    if uid in data:
+        del data[uid]
         save_data(data)
-    await message.answer("Данные сброшены ❌", reply_markup=get_main_keyboard())
-    await state.clear()
+    await message.answer("♻️ Данные сброшены. Напиши /start чтобы начать заново.")
+
+# ============================ ЗАПУСК ============================
 
 async def main():
     await dp.start_polling(bot)
