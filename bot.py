@@ -1,174 +1,122 @@
-import os
-import json
 import logging
-from datetime import datetime
-from aiogram import Bot, Dispatcher, F, types
+import json
+from pathlib import Path
+from aiogram import Bot, Dispatcher, F
+from aiogram.types import Message
+from aiogram.fsm.context import FSMContext
+from aiogram.fsm.storage.memory import MemoryStorage
+from aiogram.fsm.state import State, StatesGroup
 from aiogram.enums import ParseMode
-from aiogram.client.default import DefaultBotProperties
-from aiogram.types import Message, ReplyKeyboardMarkup, KeyboardButton
-from aiogram.filters import Command
+from aiogram.filters import CommandStart, Command
+from aiogram.utils.keyboard import InlineKeyboardBuilder
+import asyncio
+import os
 from dotenv import load_dotenv
 
-# Загрузка переменных окружения
 load_dotenv()
-API_TOKEN = os.getenv("API_TOKEN")
 
-# Настройка логирования
+TOKEN = os.getenv("BOT_TOKEN")
+DATA_FILE = Path("data.json")
+if not DATA_FILE.exists():
+    DATA_FILE.write_text(json.dumps({}))
+
+bot = Bot(token=TOKEN, parse_mode=ParseMode.HTML)
+storage = MemoryStorage()
+dp = Dispatcher(storage=storage)
 logging.basicConfig(level=logging.INFO)
 
-# Инициализация бота и диспетчера
-bot = Bot(token=API_TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
-dp = Dispatcher()
+class Form(StatesGroup):
+    waiting_for_comment = State()
 
-# Путь к файлу базы данных
-DB_FILE = "database.json"
-
-# Загрузка данных из файла
+# Загружаем данные
 def load_data():
-    if os.path.exists(DB_FILE):
-        with open(DB_FILE, "r") as f:
-            return json.load(f)
-    return {}
+    return json.loads(DATA_FILE.read_text())
 
-# Сохранение данных в файл
+# Сохраняем данные
 def save_data(data):
-    with open(DB_FILE, "w") as f:
-        json.dump(data, f, indent=2)
+    DATA_FILE.write_text(json.dumps(data, indent=2))
 
-# Получение данных пользователя
-def get_user_data(user_id):
+# Получить клавиатуру меню
+def get_main_keyboard():
+    kb = InlineKeyboardBuilder()
+    kb.button(text="➕ Добавить тренировку", callback_data="add_training")
+    kb.button(text="📅 Следующая тренировка", callback_data="next_training")
+    kb.button(text="📊 Статистика", callback_data="stats")
+    kb.adjust(1)
+    return kb.as_markup()
+
+# Получить статус
+def get_status(user_id):
     data = load_data()
-    if str(user_id) not in data:
-        data[str(user_id)] = {
-            "goal": 0,
-            "done": 0,
-            "next_training": "не запланирована",
-            "last_training": "нет данных",
-            "comment": "",
-            "rewards": [],
-            "sport": "не выбран"
-        }
-    return data
+    user = data.get(str(user_id), {})
+    status = f"🎯 Цель: {user.get('goal', 'не задана')}\n"
+    status += f"📈 Тренировок: {len(user.get('trainings', []))}\n"
+    status += f"📅 Следующая: {user.get('next', 'не запланирована')}\n"
+    status += f"💬 Последний коммент: {user.get('last_comment', '—')}"
+    return status
 
-# Обновление данных пользователя
-def update_user_data(user_id, new_info):
-    data = get_user_data(user_id)
-    data[str(user_id)].update(new_info)
+@dp.message(CommandStart())
+async def cmd_start(message: Message, state: FSMContext):
+    kb = get_main_keyboard()
+    await message.answer(f"Привет, {message.from_user.first_name}!\n\nВот твой статус:\n\n{get_status(message.from_user.id)}", reply_markup=kb)
+    await state.clear()
+
+@dp.callback_query(F.data == "add_training")
+async def add_training(callback, state: FSMContext):
+    data = load_data()
+    user_id = str(callback.from_user.id)
+    user = data.setdefault(user_id, {"trainings": []})
+    user["trainings"].append("✅")
     save_data(data)
 
-# Форматирование статуса пользователя
-def format_status(user_id):
-    data = get_user_data(user_id)[str(user_id)]
-    goal = data["goal"]
-    done = data["done"]
-    reward = "🏅" if done >= goal and goal > 0 else ""
-    return (
-        f"<b>🎯 Цель месяца:</b> {done}/{goal} тренировок {reward}\n"
-        f"<b>📅 Следующая тренировка:</b> {data['next_training']}\n"
-        f"<b>🏋️‍♂️ Последняя тренировка:</b> {data['last_training']}\n"
-        f"<b>🏃‍♂️ Вид спорта:</b> {data['sport']}\n"
-        f"<b>💬 Комментарий:</b> {data['comment']}"
-    )
+    await callback.message.edit_text("Тренировка добавлена ✅\n\nНапиши кратко, как она прошла:", reply_markup=None)
+    await state.set_state(Form.waiting_for_comment)
+    await callback.answer()
 
-# Главное меню
-main_kb = ReplyKeyboardMarkup(
-    keyboard=[
-        [KeyboardButton(text="➕ Добавить тренировку"), KeyboardButton(text="✅ Закончить тренировку")],
-        [KeyboardButton(text="🎯 Установить цель"), KeyboardButton(text="📅 Запланировать тренировку")],
-        [KeyboardButton(text="⚙️ Выбрать спорт"), KeyboardButton(text="🔁 Сбросить всё")],
-        [KeyboardButton(text="📊 Мой прогресс")]
-    ],
-    resize_keyboard=True
-)
-
-# Обработчик команды /start
-@dp.message(Command("start"))
-async def cmd_start(message: Message):
-    await message.answer(
-        "<b>Привет! Я спортивный бот 💪</b>\n\n"
-        "Вот что я умею:\n"
-        "➕ Добавлять тренировки\n"
-        "✅ Отмечать завершение\n"
-        "🎯 Ставить цель на месяц\n"
-        "📅 Планировать следующую тренировку\n"
-        "⚙️ Выбирать вид спорта\n"
-        "🔁 Сбрасывать прогресс\n"
-        "📊 Показывать текущий статус\n\n"
-        "Выбери команду ниже:",
-        reply_markup=main_kb
-    )
-
-# Установка цели
-@dp.message(F.text == "🎯 Установить цель")
-async def set_goal(message: Message):
-    await message.answer("Введите цель: сколько тренировок вы хотите сделать в этом месяце?")
-    dp.message.register_once(set_goal_value)
-
-async def set_goal_value(message: Message):
-    try:
-        goal = int(message.text)
-        update_user_data(message.from_user.id, {"goal": goal})
-        await message.answer("Цель сохранена ✅\n\n" + format_status(message.from_user.id))
-    except ValueError:
-        await message.answer("Введите число.")
-
-# Планирование тренировки
-@dp.message(F.text == "📅 Запланировать тренировку")
-async def plan_next(message: Message):
-    await message.answer("Введите дату следующей тренировки (например, 20 июня):")
-    dp.message.register_once(save_next_training)
-
-async def save_next_training(message: Message):
-    update_user_data(message.from_user.id, {"next_training": message.text})
-    await message.answer("Запланировано 📅\n\n" + format_status(message.from_user.id))
-
-# Добавление тренировки
-@dp.message(F.text == "➕ Добавить тренировку")
-async def add_training(message: Message):
-    user_id = message.from_user.id
-    data = get_user_data(user_id)
-    data[str(user_id)]["done"] += 1
-    save_data(data)
-    await message.answer("Тренировка добавлена 💪\nНапиши, как прошла:")
-    dp.message.register_once(save_comment)
-
-async def save_comment(message: Message):
-    update_user_data(message.from_user.id, {
-        "comment": message.text,
-        "last_training": datetime.now().strftime("%d %B %Y")
-    })
-    await message.answer("Комментарий сохранён 📝\n\n" + format_status(message.from_user.id))
-
-# Завершение тренировки
-@dp.message(F.text == "✅ Закончить тренировку")
-async def finish_training(message: Message):
-    await message.answer("Хорошая работа! 💥\n\n" + format_status(message.from_user.id))
-
-# Выбор вида спорта
-@dp.message(F.text == "⚙️ Выбрать спорт")
-async def choose_sport(message: Message):
-    await message.answer("Какой вид спорта? (Например: бег, йога, зал)")
-    dp.message.register_once(save_sport)
-
-async def save_sport(message: Message):
-    update_user_data(message.from_user.id, {"sport": message.text})
-    await message.answer("Вид спорта обновлён ✅\n\n" + format_status(message.from_user.id))
-
-# Сброс данных
-@dp.message(F.text == "🔁 Сбросить всё")
-async def reset_user(message: Message):
+@dp.message(Form.waiting_for_comment)
+async def save_comment(message: Message, state: FSMContext):
     data = load_data()
-    if str(message.from_user.id) in data:
-        del data[str(message.from_user.id)]
+    user_id = str(message.from_user.id)
+    comment = message.text
+    data.setdefault(user_id, {})["last_comment"] = comment
+    save_data(data)
+
+    await message.answer(f"Комментарий сохранён ✅\n\nОбновлённый статус:\n\n{get_status(user_id)}", reply_markup=get_main_keyboard())
+    await state.clear()
+
+@dp.callback_query(F.data == "next_training")
+async def set_next(callback, state: FSMContext):
+    await callback.message.edit_text("Напиши дату следующей тренировки (например, 15 июня):")
+    await state.set_state("waiting_for_date")
+    await callback.answer()
+
+@dp.message(F.state == "waiting_for_date")
+async def save_date(message: Message, state: FSMContext):
+    data = load_data()
+    user_id = str(message.from_user.id)
+    data.setdefault(user_id, {})["next"] = message.text
+    save_data(data)
+
+    await message.answer(f"Дата сохранена ✅\n\nОбновлённый статус:\n\n{get_status(user_id)}", reply_markup=get_main_keyboard())
+    await state.clear()
+
+@dp.callback_query(F.data == "stats")
+async def show_stats(callback, state: FSMContext):
+    await callback.message.edit_text(f"📊 Твоя статистика:\n\n{get_status(callback.from_user.id)}", reply_markup=get_main_keyboard())
+    await callback.answer()
+
+@dp.message(Command("reset"))
+async def reset_user(message: Message, state: FSMContext):
+    data = load_data()
+    user_id = str(message.from_user.id)
+    if user_id in data:
+        del data[user_id]
         save_data(data)
-    await message.answer("Данные сброшены 🔁")
+    await message.answer("Данные сброшены ❌", reply_markup=get_main_keyboard())
+    await state.clear()
 
-# Показ прогресса
-@dp.message(F.text == "📊 Мой прогресс")
-async def show_progress(message: Message):
-    await message.answer(format_status(message.from_user.id))
+async def main():
+    await dp.start_polling(bot)
 
-# Запуск
 if __name__ == "__main__":
-    import asyncio
-    asyncio.run(dp.start_polling(bot))
+    asyncio.run(main())
